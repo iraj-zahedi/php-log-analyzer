@@ -327,8 +327,7 @@ $current_params = $_GET;
             </table></div>
         </div>
         
-        <div class="footer-card"><p>این ابزار متن‌باز با ❤️ توسط <a href="https://blueserver.ir/author/iraj-zahedi/" target="_blank">ایرج زاهدی</a> برای <a href="https://blueserver.ir/" target="_blank">بلوسرور</a> توسعه داده شده است.</p></div>
-    </div>
+<div class="footer-card"> <p> این ابزار متن‌باز، توسط <a href="https://blueserver.ir/" target="_blank">بلوسرور</a> توسعه داده شده است. سورس‌کد در <a href="https://github.com/iraj-zahedi" target="_blank">GitHub</a>. </p> </div>    </div>
     
     <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
     <script type="text/javascript" src="https://www.gstatic.com/charts/loader.js"></script>
