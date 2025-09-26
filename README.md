@@ -1,8 +1,10 @@
 # تحلیلگر جامع لاگ سرور با PHP
-[اسکرین شات 1](https://raw.githubusercontent.com/iraj-zahedi/php-log-analyzer/refs/heads/main/log-analyzer1.png)
+[اسکرین شات 1](https://raw.githubusercontent.com/iraj-zahedi/php-log-analyzer/refs/heads/main/log-analyzer1.png
+)
 [اسکرین شات 2](https://raw.githubusercontent.com/iraj-zahedi/php-log-analyzer/refs/heads/main/log-analyzer2.png)
 
 [اسکرین شات 3](https://raw.githubusercontent.com/iraj-zahedi/php-log-analyzer/refs/heads/main/log-analyzer3.png)
+
 [اسکرین شات 4](https://raw.githubusercontent.com/iraj-zahedi/php-log-analyzer/refs/heads/main/log-analyzer4.png)
 
 ابزاری قدرتمند، سبک و **تک-فایلی** برای تحلیل آنی لاگ‌های سرور لینوکس. این اسکریپت به شما کمک می‌کند تا حملات، خطاهای سیستمی و رویدادهای امنیتی را به سرعت شناسایی کرده و از طریق یک داشبورد گرافیکی و تعاملی، وضعیت سرور خود را مانیتور کنید.
