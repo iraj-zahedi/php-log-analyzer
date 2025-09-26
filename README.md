@@ -1,6 +1,6 @@
 # تحلیلگر جامع لاگ سرور با PHP
-[اسکرین شات 1](https://raw.githubusercontent.com/iraj-zahedi/php-log-analyzer/refs/heads/main/log-analyzer1.png
-)
+[اسکرین شات 1](https://raw.githubusercontent.com/iraj-zahedi/php-log-analyzer/refs/heads/main/log-analyzer1.png)
+
 [اسکرین شات 2](https://raw.githubusercontent.com/iraj-zahedi/php-log-analyzer/refs/heads/main/log-analyzer2.png)
 
 [اسکرین شات 3](https://raw.githubusercontent.com/iraj-zahedi/php-log-analyzer/refs/heads/main/log-analyzer3.png)
