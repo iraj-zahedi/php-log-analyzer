@@ -1,260 +1,422 @@
 <?php
-
-// --- پیکربندی ---
-// !!! مهم: مسیر واقعی فایل‌های لاگ سرور خود را در این آرایه وارد کنید.
+// --- ١. پیکربندی ---
 $logFiles = [
     'access.log', // فایل نمونه شما
+    '/var/log/fail2ban.log',           // لاگ Fail2ban
+    '/var/log/maillog',                // لاگ ایمیل (Dovecot, Exim, Postfix)
     // --- مسیرهای رایج در سرورهای لینوکسی (حتماً متناسب با سرور خود فعال کنید) ---
     // '/var/log/httpd/access_log',      // لاگ دسترسی آپاچی
-    // '/var/log/httpd/error_log',       // لاگ خطای آپاچی
+    '/var/log/httpd/error_log',       // لاگ خطای آپاچی
     // '/var/log/secure',                // لاگ‌های امنیتی (SSH, Sudo) در CentOS/RHEL
     // '/var/log/auth.log',              // لاگ‌های امنیتی (SSH, Sudo) در Debian/Ubuntu
-    // '/var/log/maillog',               // لاگ ایمیل
     // '/var/log/messages',              // لاگ عمومی سیستم در CentOS/RHEL (شامل کرنل)
     // '/var/log/syslog',                // لاگ عمومی سیستم در Debian/Ubuntu (شامل کرنل)
-    // '/var/log/php-fpm/www-error.log', // لاگ خطای PHP-FPM
+    // '/var/log/modsec_audit.log',      // لاگ ModSecurity
+    // '/var/log/mysql/error.log',       // لاگ خطای MySQL/MariaDB در Debian/Ubuntu
+    // '/var/lib/mysql/error.log',       // لاگ خطای MySQL/MariaDB در CentOS/RHEL
 ];
+$events_per_page = 50; // تعداد رویدادها در هر صفحه
 
-// --- توابع اصلی ---
-
-// [تابع parse_line با تمام تحلیلگرهای سیستمی و امنیتی بدون تغییر باقی می‌ماند]
-function parse_line($line) {
-    $line = trim($line);
-    if (empty($line)) return null;
-    $patterns = [
-        'kernel_panic' => function($line) { $pattern = '/^(?<timestamp>\w{3}\s+\d+\s+[\d:]+) .*? kernel: Kernel panic - not syncing: (?<message>.*)$/'; if (preg_match($pattern, $line, $matches)) { return ['type' => 'system_critical', 'timestamp' => $matches['timestamp'], 'timestamp_unix' => strtotime($matches['timestamp']), 'ip' => 'CRITICAL', 'message' => 'Kernel Panic!', 'full_log_message' => $line, 'attack_details' => ['type' => 'System Crash', 'subtype' => 'Kernel Panic', 'description' => 'یک خطای بسیار جدی در سطح هسته (Kernel Panic) رخ داده که منجر به کرش کامل سرور شده است.', 'mitigation' => 'این خطاها معمولاً به دلیل مشکلات سخت‌افزاری (RAM خراب)، درایورهای ناسازگار یا باگ‌های هسته رخ می‌دهają. سرور را از نظر سخت‌افزاری بررسی کرده و سیستم‌عامل را به‌روز کنید.']]; } return null; },
-        'oom_killer' => function($line) { $pattern = '/^(?<timestamp>\w{3}\s+\d+\s+[\d:]+) .*? kernel: Out of memory: Kill process (?<pid>\d+) \((?<process>.*?)\)/'; if (preg_match($pattern, $line, $matches)) { return ['type' => 'system_warning', 'timestamp' => $matches['timestamp'], 'timestamp_unix' => strtotime($matches['timestamp']), 'ip' => 'SYSTEM', 'message' => 'Out of Memory Killer invoked', 'full_log_message' => $line, 'attack_details' => ['type' => 'Resource Exhaustion', 'subtype' => 'OOM Killer', 'description' => 'سرور با کمبود شدید حافظه RAM مواجه شده و هسته برای جلوگیری از کرش، پروسه "'.htmlspecialchars($matches['process']).'" را به اجبار بسته است.', 'mitigation' => 'مصرف حافظه سرور را با دستور `free -h` و `top` بررسی کنید. ممکن است نیاز به افزایش RAM یا Swap داشته باشید یا سرویس‌های پرمصرف را بهینه‌سازی کنید.']]; } return null; },
-        'hardware_error' => function($line) { $pattern = '/^(?<timestamp>\w{3}\s+\d+\s+[\d:]+) .*? kernel: .*?(I\/O error|Hardware Error|MCE|ata error|SCSI error).*? on device (?<device>\S+)/i'; if (preg_match($pattern, $line, $matches)) { return ['type' => 'system_critical', 'timestamp' => $matches['timestamp'], 'timestamp_unix' => strtotime($matches['timestamp']), 'ip' => 'HARDWARE', 'message' => 'Hardware Error Detected', 'full_log_message' => $line, 'attack_details' => ['type' => 'System Failure', 'subtype' => 'Hardware Error', 'description' => 'یک خطای سخت‌افزاری روی دستگاه "'.htmlspecialchars($matches['device']).'" شناسایی شد. این می‌تواند نشانه خرابی دیسک، RAM یا CPU باشد.', 'mitigation' => 'فوراً وضعیت سلامت سخت‌افزار سرور را بررسی کنید. برای دیسک از ابزار S.M.A.R.T (دستور `smartctl -a /dev/sda`) و برای حافظه از ابزار memtest86 استفاده کنید.']]; } return null; },
-        'system_boot' => function($line) { $pattern = '/^(?<timestamp>\w{3}\s+\d+\s+[\d:]+) .*? kernel: Linux version .*?$/'; if (preg_match($pattern, $line, $matches)) { return ['type' => 'system_event', 'timestamp' => $matches['timestamp'], 'timestamp_unix' => strtotime($matches['timestamp']), 'ip' => 'SYSTEM', 'message' => 'System startup detected', 'full_log_message' => $line, 'attack_details' => ['type' => 'System Event', 'subtype' => 'System Boot', 'description' => 'سیستم در این زمان راه‌اندازی شده است. اگر این یک ری‌استارت برنامه‌ریزی نشده بوده، لاگ‌های قبل از این زمان را برای یافتن علت بررسی کنید.', 'mitigation' => 'برای تحلیل علت ری‌استارت، از دستور `journalctl -b -1` یا `last -x` در ترمینال برای مشاهده لاگ‌های بوت و خاموش شدن قبلی استفاده کنید.']]; } return null; },
-        'sudo_usage' => function($line) { $pattern = '/^(?<timestamp>\w{3}\s+\d+\s+[\d:]+) .*? (?:sudo|su)\[\d+\]: \s*(?<user>\S+) : (?<result>.*? session opened|COMMAND=.*)$/'; if (preg_match($pattern, $line, $matches)) { return ['type' => 'system_security', 'timestamp' => $matches['timestamp'], 'timestamp_unix' => strtotime($matches['timestamp']), 'ip' => 'LOCAL', 'message' => 'Root access by user '.$matches['user'], 'full_log_message' => $line, 'attack_details' => ['type' => 'Security Event', 'subtype' => 'Root Access', 'description' => 'کاربر "'.htmlspecialchars($matches['user']).'" به سطح دسترسی ریشه (root) دسترسی پیدا کرده است. این یک رویداد امنیتی مهم است.', 'mitigation' => 'اطمینان حاصل کنید که این فعالیت مجاز بوده است. دسترسی به sudo را فقط به کاربران معتمد محدود کنید.']]; } return null; },
-        'phpfpm_warning' => function($line) { $pattern = '/^(?<timestamp>\w{3}\s+\d+\s+[\d:]+) .*? php-fpm: .*? WARNING: \[pool .*?\] server reached max_children setting \((?<limit>\d+)\)/'; if (preg_match($pattern, $line, $matches)) { return ['type' => 'service_warning', 'timestamp' => $matches['timestamp'], 'timestamp_unix' => strtotime($matches['timestamp']), 'ip' => 'SERVICE', 'message' => 'PHP-FPM reached process limit', 'full_log_message' => $line, 'attack_details' => ['type' => 'Service Health', 'subtype' => 'PHP-FPM Limit', 'description' => 'سرویس PHP-FPM به حداکثر تعداد پردازش‌های مجاز ('.htmlspecialchars($matches['limit']).') رسیده است. این موضوع باعث کندی شدید یا از دسترس خارج شدن سایت می‌شود.', 'mitigation' => 'مقدار `pm.max_children` را در فایل پیکربندی PHP-FPM pool خود افزایش دهید. همچنین کدهای PHP را برای پیدا کردن اسکریپت‌های کند و زمان‌بر بهینه‌سازی کنید.']]; } return null; },
-        'json_audit' => function($line) { if (strpos($line, '{"transaction":') === 0) { $data = json_decode($line, true); if (json_last_error() === JSON_ERROR_NONE && isset($data['audit_data']['messages'][0])) { $attack_message = $data['audit_data']['messages'][0]; $attack_details = detect_attack_from_waf_log($attack_message); if ($attack_details) { return ['type' => 'json_audit', 'timestamp' => $data['transaction']['time'], 'timestamp_unix' => strtotime(preg_replace('/:[0-9]{6}\s/', ' ', $data['transaction']['time'])), 'ip' => $data['transaction']['remote_address'], 'message' => $data['request']['request_line'] ?? 'N/A', 'user_agent' => $data['request']['headers']['User-Agent'] ?? 'N/A', 'full_log_message' => $attack_message, 'attack_details' => $attack_details]; } } } return null; },
-        'ssh_log' => function($line) { $pattern = '/^(?<timestamp>\w{3}\s+\d+\s+[\d:]+) .*? sshd\[\d+\]: Failed password for (?<invalid>invalid user )?(?<user>\S+) from (?<ip>[\d\.]+) port \d+ ssh2$/'; if (preg_match($pattern, $line, $matches)) { $user_type = empty($matches['invalid']) ? 'کاربر معتبر' : 'کاربر نامعتبر'; $details = ['type' => 'Brute-Force', 'subtype' => 'SSH Auth Failure', 'description' => 'تلاش ناموفق برای ورود به سرور از طریق SSH با نام کاربری '.htmlspecialchars($matches['user']).' ('.$user_type.') ثبت شده است.', 'mitigation' => 'این IP را فوراً در فایروال مسدود کنید. پورت SSH را به یک عدد غیر استاندارد تغییر دهید و ورود با رمز عبور را برای کاربر root غیرفعال کرده و از کلیدهای SSH استفاده کنید.', 'matched_pattern' => $matches['user']]; return ['type' => 'ssh_log', 'timestamp' => $matches['timestamp'], 'timestamp_unix' => strtotime($matches['timestamp']), 'ip' => $matches['ip'], 'message' => "Failed SSH login for {$user_type} '{$matches['user']}'", 'full_log_message' => $line, 'attack_details' => $details]; } return null; },
-        'mail_log' => function($line) { $exim_pattern = '/^(?<timestamp>\S+ \S+) login authenticator failed for .*? \[(?<ip>[\d\.:a-fA-F]+)\]: .*?\(set_id=(?<user>.*?)\)$/'; if (preg_match($exim_pattern, $line, $matches)) { return ['type' => 'mail_log', 'timestamp' => $matches['timestamp'], 'timestamp_unix' => strtotime($matches['timestamp']), 'ip' => $matches['ip'], 'message' => "Failed mail login for user: " . $matches['user'], 'full_log_message' => $line, 'attack_details' => ['type' => 'Brute-Force', 'subtype' => 'SMTP/IMAP Auth Failure', 'description' => 'تلاش ناموفق برای ورود به ایمیل با نام کاربری '.htmlspecialchars($matches['user']).'. تکرار این خطا نشانه حمله Brute-Force است.', 'mitigation' => 'این IP را در فایروال مسدود کنید. از رمزهای عبور قوی برای ایمیل‌ها استفاده کنید.']]; } $dovecot_pattern = '/^(?<timestamp>\w{3}\s+\d+\s+[\d:]+) .*? dovecot\[\d+\]: .*?-login: Disconnected: .*?(?:no auth attempts|Too many invalid commands).*?rip=(?<ip>[\d\.]+),/'; if (preg_match($dovecot_pattern, $line, $matches)) { return ['type' => 'mail_log', 'timestamp' => $matches['timestamp'], 'timestamp_unix' => strtotime($matches['timestamp']), 'ip' => $matches['ip'], 'message' => 'Suspicious disconnect from mail server', 'full_log_message' => $line, 'attack_details' => ['type' => 'Connection Scan', 'subtype' => 'POP3/IMAP Scan', 'description' => 'یک اتصال به سرور ایمیل برقرار و بدون تلاش برای احراز هویت یا با دستورات نامعتبر قطع شده است. این رفتار معمولاً مربوط به اسکنرهای امنیتی است.', 'mitigation' => 'فایروال شما باید این IPها را در صورت تکرار خطا به صورت خودکار مسدود کند (مانند کاری که Fail2Ban انجام می‌دهد).']]; } return null; },
-        'firewall_log' => function($line) { $pattern = '/^(?<timestamp>\w{3}\s+\d+\s+[\d:]+) .*? kernel: .*?(?:Firewall: \*)?(?<action>\S+)\s+Blocked\*?.*?SRC=(?<ip>[\d\.]+) .*?PROTO=(?<protocol>\S+)(?: DPT=(?<dpt>\d+))?/'; if (preg_match($pattern, $line, $matches)) { $protocol = $matches['protocol']; $dpt = $matches['dpt'] ?? 'N/A'; $description = "ترافیک {$protocol} به پورت {$dpt} از IP ".htmlspecialchars($matches['ip'])." توسط فایروال مسدود شده است."; $subtype = ($protocol === 'ICMP') ? 'ICMP Scan (Ping)' : 'Port Scan'; return ['type' => 'firewall_log', 'timestamp' => $matches['timestamp'], 'timestamp_unix' => strtotime($matches['timestamp']), 'ip' => $matches['ip'], 'message' => "Firewall blocked {$protocol} packet to port {$dpt}", 'full_log_message' => $line, 'attack_details' => ['type' => 'Firewall Block', 'subtype' => $subtype, 'description' => $description, 'mitigation' => 'فایروال شما به درستی کار کرده است. این بسته‌ها معمولاً توسط اسکنرهای خودکار ارسال می‌شوند. نیازی به اقدام فوری نیست مگر اینکه تعداد آن‌ها بسیار زیاد باشد.']]; } return null; },
-        'access_log' => function($line) { $pattern = '/^(?<ip>[\d\.]+) \S+ \S+ \[(?<timestamp>.*?)\].*?"(?<method>GET|POST|PUT|DELETE|HEAD) (?<url>.*?) HTTP.*?" (?<code>\d{3}) (?<size>\d+) "(?<referrer>.*?)" "(?<agent>.*?)"$/'; if (preg_match($pattern, $line, $matches)) { $attack_details = detect_attack_from_access_log($matches['url']); if ($attack_details) { return ['type' => 'access_log', 'timestamp' => $matches['timestamp'], 'timestamp_unix' => strtotime($matches['timestamp']), 'ip' => $matches['ip'], 'message' => $matches['method'] . ' ' . $matches['url'], 'user_agent' => $matches['agent'], 'full_log_message' => $line, 'attack_details' => $attack_details]; } } return null; },
+// --- ٢. توابع اصلی ---
+function get_all_parsers() {
+    return [
+        'apache_logs'       => ['label' => 'لاگ‌های آپاچی', 'parser' => function($line) {
+            $p = '/^\[.*?\] \[ssl:warn\].*? AH01909: (?<vhost>.*?) server certificate does NOT include an ID which matches the server name/';
+            if (preg_match($p, $line, $m)) return ['type' => 'service_warning', 'ts' => date("Y-m-d H:i:s"), 'ip' => 'SERVER', 'msg' => $line, 'details' => ['type' => 'Server Config', 'subtype' => 'SSL Mismatch', 'desc' => 'نام سرور با گواهی SSL برای هاست '.htmlspecialchars($m['vhost']).' مطابقت ندارد.', 'miti' => 'گواهی SSL را بررسی و در صورت نیاز مجدداً صادر کنید.']];
+            $p = '/^\[.*?\] \[(?:core|mpm_event):notice\].*? (AH00489|AH00094|AH00493)/';
+            if (preg_match($p, $line, $m)) return ['type' => 'system_event', 'ts' => date("Y-m-d H:i:s"), 'ip' => 'SYSTEM', 'msg' => $line, 'details' => ['type' => 'Server Event', 'subtype' => 'Apache Status', 'desc' => 'آپاچی در حال شروع به کار یا ری‌استارت است.', 'miti' => 'این یک پیام اطلاعاتی است و نیاز به اقدامی ندارد.']];
+            $p = '/^\[.*?\] \[proxy_fcgi:error\].*? \[client (?<ip>[\d\.:a-fA-F]+)\:\d+\] AH01071: Got error \'Primary script unknown\'/';
+            if (preg_match($p, $line, $m)) return ['type' => 'service_error', 'ts' => date("Y-m-d H:i:s"), 'ip' => $m['ip'], 'msg' => $line, 'details' => ['type' => 'Application Error', 'subtype' => 'FCGI Script Not Found', 'desc' => 'وب سرور نتوانست اسکریپت PHP درخواستی را پیدا کند.', 'miti' => 'مسیر فایل‌ها و تنظیمات FPM/FCGI را در کانفیگ وب سرور بررسی کنید.']];
+            $p = '/^\[.*?\] \[access_compat:error\].*? \[client (?<ip>[\d\.:a-fA-F]+)\:\d+\] AH01797: client denied by server configuration/';
+            if (preg_match($p, $line, $m)) return ['type' => 'access_denied', 'ts' => date("Y-m-d H:i:s"), 'ip' => $m['ip'], 'msg' => $line, 'details' => ['type' => 'Access Control', 'subtype' => 'Config Deny', 'desc' => 'دسترسی به یک مسیر توسط تنظیمات آپاچی (مثلاً .htaccess) رد شد.', 'miti' => 'این رفتار مورد انتظار است اگر مسیر محافظت شده باشد. در غیر این صورت، فایل .htaccess را بررسی کنید.']];
+            return null;
+        }],
+        'mail_server_logs'  => ['label' => 'لاگ‌های سرور ایمیل', 'parser' => function($line) {
+            $p = '/^(?<ts>\w{3}\s+\d+\s+[\d:]+) .*? dovecot.*?: (?:imap|pop3)-login: Disconnected:.*?SSL_accept\(\) failed:.*?error:.*?:\s*(?<reason>no shared cipher|unsupported protocol|version too low|wrong version number|http request|bad key share).*?rip=(?<ip>[\d\.:a-fA-F]+),/i';
+            if (preg_match($p, $line, $m)) return ['type' => 'service_warning', 'ts' => $m['ts'], 'ip' => $m['ip'], 'msg' => $line, 'details' => ['type' => 'Mail Server Warning', 'subtype' => 'SSL/TLS Handshake Failure', 'desc' => 'اتصال ایمیل به دلیل خطای SSL رد شد: ' . htmlspecialchars($m['reason']), 'miti' => 'این IP احتمالاً یک اسکنر امنیتی یا یک کلاینت قدیمی است. اگر تکرار شد آن را مسدود کنید.']];
+            $p = '/^(?<ts>\w{3}\s+\d+\s+[\d:]+) .*? dovecot.*?: (?:imap|pop3)-login: Disconnected: Too many invalid commands.*?rip=(?<ip>[\d\.:a-fA-F]+),/';
+            if (preg_match($p, $line, $m)) return ['type' => 'service_warning', 'ts' => $m['ts'], 'ip' => $m['ip'], 'msg' => $line, 'details' => ['type' => 'Potential Attack', 'subtype' => 'Mail Server Probe', 'desc' => 'اتصال به دلیل ارسال دستورات نامعتبر زیاد قطع شد.', 'miti' => 'این IP در حال بررسی سرور ایمیل است. آن را مسدود کنید.']];
+            $p = '/^(?<ts>\w{3}\s+\d+\s+[\d:]+) .*? dovecot.*?: (?:imap|pop3)-login: Login: user=<(?<user>.*?)>.*?rip=(?<ip>[\d\.:a-fA-F]+),/';
+            if (preg_match($p, $line, $m)) return ['type' => 'system_event', 'ts' => $m['ts'], 'ip' => $m['ip'], 'msg' => $line, 'details' => ['type' => 'User Authentication', 'subtype' => 'Mail Login Success', 'desc' => 'کاربر ' . htmlspecialchars($m['user']) . ' با موفقیت وارد شد.', 'miti' => 'پیام اطلاعاتی. در صورت مشکوک بودن به فعالیت، آن را بررسی کنید.']];
+            $p = '/^(?<ts>\S+ \S+) login authenticator failed for .*? \[(?<ip>[\d\.:a-fA-F]+)\]: .*?\(set_id=(?<user>.*?)\)$/';
+            if (preg_match($p, $line, $m)) return ['type' => 'mail_log', 'ts' => $m['ts'], 'ip' => $m['ip'], 'msg' => $line, 'details' => ['type' => 'Brute-Force', 'subtype' => 'SMTP/IMAP Auth', 'desc' => 'تلاش ناموفق ورود به ایمیل '.htmlspecialchars($m['user']), 'miti' => 'IP را مسدود و از رمزهای قوی استفاده کنید.']];
+            return null;
+        }],
+        'modsec_log'        => ['label' => 'لاگ ModSecurity', 'parser' => function($line) { $p = '/^\[.*?\] \[security2:error\].*? \[client (?<ip>[\d\.:a-fA-F]+)(?::\d+)?\] ModSecurity: .*? \[msg "(?<msg>.*?)"\].*? \[id "(?<id>\d+)"\]/'; if (preg_match($p, $line, $m)) return ['type' => 'modsec_log', 'ts' => date("Y-m-d H:i:s"), 'ip' => $m['ip'], 'msg' => $line, 'details' => ['type' => 'WAF Block', 'subtype' => 'ModSecurity Rule #'.$m['id'], 'desc' => htmlspecialchars($m['msg']), 'miti' => 'این یک حمله وب شناسایی شده است. IP را بررسی و مسدود کنید.']]; return null; }],
+        'kernel_panic'      => ['label' => 'کرنل پنیک (کرش سرور)', 'parser' => function($line) { $p = '/^(?<ts>\w{3}\s+\d+\s+[\d:]+) .*? kernel: Kernel panic.*?$/'; if (preg_match($p, $line, $m)) return ['type' => 'system_critical', 'ts' => $m['ts'], 'ip' => 'CRITICAL', 'msg' => $line, 'details' => ['type' => 'System Crash', 'subtype' => 'Kernel Panic', 'desc' => 'کرش کامل سرور به دلیل خطای هسته.', 'miti' => 'مشکلات سخت‌افزاری (RAM) یا درایورها را بررسی کنید.']]; return null; }],
+        'oom_killer'        => ['label' => 'کمبود حافظه (OOM Killer)', 'parser' => function($line) { $p = '/^(?<ts>\w{3}\s+\d+\s+[\d:]+) .*? kernel: Out of memory: Kill process \d+ \((?<proc>.*?)\)/'; if (preg_match($p, $line, $m)) return ['type' => 'system_warning', 'ts' => $m['ts'], 'ip' => 'SYSTEM', 'msg' => $line, 'details' => ['type' => 'Resource Exhaustion', 'subtype' => 'OOM Killer', 'desc' => 'سرور به دلیل کمبود RAM، پروسه "'.htmlspecialchars($m['proc']).'" را بسته.', 'miti' => 'مصرف حافظه را با `free -h` بررسی کنید.']]; return null; }],
+        'hardware_error'    => ['label' => 'خطاهای سخت‌افزاری', 'parser' => function($line) { $p = '/^(?<ts>\w{3}\s+\d+\s+[\d:]+) .*? kernel: .*?(I\/O error|Hardware Error|MCE).*? on device (?<dev>\S+)/i'; if (preg_match($p, $line, $m)) return ['type' => 'system_critical', 'ts' => $m['ts'], 'ip' => 'HARDWARE', 'msg' => $line, 'details' => ['type' => 'System Failure', 'subtype' => 'Hardware Error', 'desc' => 'خطای سخت‌افزاری روی دستگاه '.htmlspecialchars($m['dev']), 'miti' => 'سلامت سخت‌افزار را با S.M.A.R.T بررسی کنید.']]; return null; }],
+        'system_boot'       => ['label' => 'راه‌اندازی مجدد سیستم', 'parser' => function($line) { $p = '/^(?<ts>\w{3}\s+\d+\s+[\d:]+) .*? kernel: Linux version .*?$/'; if (preg_match($p, $line, $m)) return ['type' => 'system_event', 'ts' => $m['ts'], 'ip' => 'SYSTEM', 'msg' => $line, 'details' => ['type' => 'System Event', 'subtype' => 'System Boot', 'desc' => 'سیستم راه‌اندازی شده است.', 'miti' => 'برای یافتن علت ری‌استارت، از `journalctl -b -1` استفاده کنید.']]; return null; }],
+        'sudo_usage'        => ['label' => 'استفاده از Sudo', 'parser' => function($line) { $p = '/^(?<ts>\w{3}\s+\d+\s+[\d:]+) .*? (?:sudo|su): \s*(?<user>\S+) : .*?session opened/'; if (preg_match($p, $line, $m)) return ['type' => 'system_security', 'ts' => $m['ts'], 'ip' => 'LOCAL', 'msg' => $line, 'details' => ['type' => 'Security Event', 'subtype' => 'Root Access', 'desc' => 'کاربر "'.htmlspecialchars($m['user']).'" به دسترسی ریشه رسید.', 'miti' => 'اطمینان حاصل کنید که این فعالیت مجاز بوده است.']]; return null; }],
+        'phpfpm_warning'    => ['label' => 'خطاهای PHP-FPM', 'parser' => function($line) { $p = '/^(?<ts>\w{3}\s+\d+\s+[\d:]+) .*? php-fpm: .*? WARNING: .*? max_children setting \((?<limit>\d+)\)/'; if (preg_match($p, $line, $m)) return ['type' => 'service_warning', 'ts' => $m['ts'], 'ip' => 'SERVICE', 'msg' => $line, 'details' => ['type' => 'Service Health', 'subtype' => 'PHP-FPM Limit', 'desc' => 'PHP-FPM به حداکثر پردازش ('.htmlspecialchars($m['limit']).') رسیده.', 'miti' => 'مقدار `pm.max_children` را افزایش دهید.']]; return null; }],
+        'ssh_log'           => ['label' => 'ورود ناموفق SSH', 'parser' => function($line) { $p = '/^(?<ts>\w{3}\s+\d+\s+[\d:]+) .*? sshd\[\d+\]: Failed password for .*?(?<user>\S+) from (?<ip>[\d\.]+) port/'; if (preg_match($p, $line, $m)) return ['type' => 'ssh_log', 'ts' => $m['ts'], 'ip' => $m['ip'], 'msg' => $line, 'details' => ['type' => 'Brute-Force', 'subtype' => 'SSH Auth Failure', 'desc' => 'تلاش ناموفق ورود SSH با نام '.htmlspecialchars($m['user']), 'miti' => 'این IP را مسدود کنید. از کلید SSH استفاده کنید.']]; return null; }],
+        'mysql_auth_fail'   => ['label' => 'خطای اتصال به دیتابیس', 'parser' => function($line) { $p = '/Access denied for user \'(?<user>.*?)\'@\'(?<ip>.*?)\'/'; if (preg_match($p, $line, $m)) return ['type' => 'database_error', 'ts' => date("Y-m-d H:i:s"), 'ip' => $m['ip'], 'msg' => $line, 'details' => ['type' => 'Database Security', 'subtype' => 'Auth Failure', 'desc' => 'اتصال ناموفق به دیتابیس با کاربر '.htmlspecialchars($m['user']), 'miti' => 'رمزهای عبور دیتابیس را بررسی کنید و دسترسی از این IP را محدود کنید.']]; return null; }],
+        'fail2ban_logs'     => ['label' => 'لاگ Fail2ban', 'parser' => function($line) {
+            $p = '/^(?<ts>[\d\s\-\,:]+) fail2ban\.actions\s+\[\d+\]: NOTICE\s+\[(?<jail>.*?)\] Ban (?<ip>[\d\.]+)$/';
+            if (preg_match($p, $line, $m)) return ['type' => 'system_security', 'ts' => date("Y-m-d H:i:s", strtotime($m['ts'])), 'ip' => $m['ip'], 'msg' => $line, 'details' => ['type' => 'Security Action', 'subtype' => 'Fail2ban Ban', 'desc' => 'IP به دلیل تخلف در قانون "'.htmlspecialchars($m['jail']).'" مسدود شد.', 'miti' => 'این یک اقدام خودکار و مورد انتظار است. Fail2ban به درستی کار کرده است.']];
+            $p = '/^(?<ts>[\d\s\-\,:]+) fail2ban\.actions\s+\[\d+\]: NOTICE\s+\[(?<jail>.*?)\] Unban (?<ip>[\d\.]+)$/';
+            if (preg_match($p, $line, $m)) return ['type' => 'system_event', 'ts' => date("Y-m-d H:i:s", strtotime($m['ts'])), 'ip' => $m['ip'], 'msg' => $line, 'details' => ['type' => 'System Event', 'subtype' => 'Fail2ban Unban', 'desc' => 'IP پس از اتمام دوره مسدودیت توسط قانون "'.htmlspecialchars($m['jail']).'" آزاد شد.', 'miti' => 'این یک پیام اطلاعاتی است و نیاز به اقدامی ندارد.']];
+            $p = '/^(?<ts>[\d\s\-\,:]+) fail2ban\.actions\s+\[\d+\]: ERROR\s+Failed to execute ban jail \'(?<jail>.*?)\'.*?Error banning (?<ip>[\d\.]+)/';
+            if (preg_match($p, $line, $m)) return ['type' => 'system_critical', 'ts' => date("Y-m-d H:i:s", strtotime($m['ts'])), 'ip' => $m['ip'], 'msg' => $line, 'details' => ['type' => 'System Failure', 'subtype' => 'Fail2ban Action Failed', 'desc' => 'Fail2ban نتوانست IP را برای قانون "'.htmlspecialchars($m['jail']).'" مسدود کند.', 'miti' => 'فوراً وضعیت فایروال سرور (مانند FirewallD یا UFW) را بررسی کنید. به احتمال زیاد فایروال خاموش است. با دستور `systemctl status firewalld` آن را چک کنید.']];
+            return null;
+        }],
+        'firewall_log'      => ['label' => 'لاگ فایروال', 'parser' => function($line) { $p = '/^(?<ts>\w{3}\s+\d+\s+[\d:]+) .*? kernel: .*?Blocked.*?SRC=(?<ip>[\d\.]+) .*?PROTO=(?<prot>\S+)/'; if (preg_match($p, $line, $m)) return ['type' => 'firewall_log', 'ts' => $m['ts'], 'ip' => $m['ip'], 'msg' => $line, 'details' => ['type' => 'Firewall Block', 'subtype' => 'Port Scan', 'desc' => 'ترافیک '.($m['prot']).' توسط فایروال مسدود شد.', 'miti' => 'فایروال به درستی کار کرده است.']]; return null; }],
+        'vuln_scan'         => ['label' => 'اسکن آسیب‌پذیری', 'parser' => function($line) { $p = '/^(?<ip>[\d\.]+) .*? \[(?<ts>.*?)\] "GET (?<url>.*?) HTTP.*?" (404|403)/'; if (preg_match($p, $line, $m)) { if (preg_match('/(wp-content|wp-includes|xmlrpc\.php|jmx-console|phpmyadmin|\.git|\.env)/i', $m['url'])) return ['type' => 'vuln_scan', 'ts' => $m['ts'], 'ip' => $m['ip'], 'msg' => $line, 'url' => $m['url'], 'details' => ['type' => 'Reconnaissance', 'subtype' => 'Vulnerability Scan', 'desc' => 'تلاش برای یافتن فایل یا افزونه آسیب‌پذیر.', 'miti' => 'IP را مسدود کنید. این یک فعالیت شناسایی است.']]; } return null; }],
+        'command_injection' => ['label' => 'حمله تزریق دستور', 'parser' => function($line) { $p = '/^(?<ip>[\d\.]+) .*? \[(?<ts>.*?)\] "(?<method>GET|POST) (?<url>.*?) HTTP.*?" \d+ \d+ ".*?" "(?<agent>.*?)"$/'; if (preg_match($p, $line, $m)) { if (preg_match('/(&&|;|\`|\|)\s*(wget|curl|cat)/i', urldecode($m['url']))) return ['type' => 'command_injection', 'ts' => $m['ts'], 'ip' => $m['ip'], 'msg' => $line, 'ua_info' => analyze_user_agent($m['agent']), 'url' => $m['url'], 'details' => ['type' => 'Critical Attack', 'subtype' => 'Command Injection', 'desc' => 'تلاش برای اجرای دستورات سیستم‌عامل.', 'miti' => 'فوراً IP را مسدود و کد را برای آسیب‌پذیری RCE بازبینی کنید.']]; } return null; }],
+        'wordpress_attacks' => ['label' => 'حملات وردپرس', 'parser' => function($line) { $p = '/^(?<ip>[\d\.]+) .*? \[(?<ts>.*?)\] "(?<method>POST|GET) (?<url>.*?) HTTP.*?" \d+ \d+ ".*?" "(?<agent>.*?)"$/'; if (preg_match($p, $line, $m)) { if (strpos($m['url'], 'wp-login.php') !== false && $m['method'] === 'POST') return ['type' => 'wordpress_bruteforce', 'ts' => $m['ts'], 'ip' => $m['ip'], 'msg' => $line, 'ua_info' => analyze_user_agent($m['agent']), 'url' => $m['url'], 'details' => ['type' => 'Brute-Force', 'subtype' => 'WordPress Login', 'desc' => 'تلاش برای ورود انبوه به وردپرس.', 'miti' => 'از افزونه‌های امنیتی و کپچا استفاده کنید.']]; } return null; }],
+        'seo_404_finder'    => ['label' => 'خطاهای سئو (404)', 'parser' => function($line) { $p = '/^(?<ip>[\d\.]+) .*? \[(?<ts>.*?)\] "GET (?<url>.*?) HTTP.*?" 404 \d+ "(?<ref>.*?)".*?"(?<agent>.*?)"$/'; if (preg_match($p, $line, $m) && !empty($m['ref']) && $m['ref'] !== '-') return ['type' => 'seo_warning', 'ts' => $m['ts'], 'ip' => $m['ip'], 'msg' => $line, 'ua_info' => analyze_user_agent($m['agent']), 'url' => $m['url'], 'details' => ['type' => 'SEO Issue', 'subtype' => 'Broken Link (404)', 'desc' => 'لینک شکسته از: '.htmlspecialchars($m['ref']), 'miti' => 'صفحه را ریدایرکت ۳۰۱ کنید یا لینک را اصلاح نمایید.']]; return null; }],
+        'sql_injection'     => ['label' => 'حمله تزریق SQL', 'parser' => function($line) { $p = '/^(?<ip>[\d\.]+) .*? \[(?<ts>.*?)\] "(?<method>GET|POST) (?<url>.*?) HTTP.*?" \d+ \d+ ".*?" "(?<agent>.*?)"$/'; if (preg_match($p, $line, $m)) { if (preg_match('/\b(union|select|insert|concat)\b/i', urldecode($m['url']))) return ['type' => 'sql_injection', 'ts' => $m['ts'], 'ip' => $m['ip'], 'msg' => $line, 'ua_info' => analyze_user_agent($m['agent']), 'url' => $m['url'], 'details' => ['type' => 'Potential Attack', 'subtype' => 'SQL Injection', 'desc' => 'تلاش برای حمله تزریق SQL.', 'miti' => 'همیشه از Prepared Statements استفاده کنید.']]; } return null; }],
+        'path_traversal'    => ['label' => 'حمله پیمایش مسیر', 'parser' => function($line) { $p = '/^(?<ip>[\d\.]+) .*? \[(?<ts>.*?)\] "(?<method>GET|POST) (?<url>.*?) HTTP.*?" \d+ \d+ ".*?" "(?<agent>.*?)"$/'; if (preg_match($p, $line, $m)) { if (preg_match('/(\.\.\/|%2e%2e%2f)/i', urldecode($m['url']))) return ['type' => 'path_traversal', 'ts' => $m['ts'], 'ip' => $m['ip'], 'msg' => $line, 'ua_info' => analyze_user_agent($m['agent']), 'url' => $m['url'], 'details' => ['type' => 'Potential Attack', 'subtype' => 'Path Traversal', 'desc' => 'تلاش برای دسترسی به فایل‌های حساس.', 'miti' => 'ورودی‌های فایل را به شدت اعتبارسنجی کنید.']]; } return null; }],
+        'xss_attack'        => ['label' => 'حمله XSS', 'parser' => function($line) { $p = '/^(?<ip>[\d\.]+) .*? \[(?<ts>.*?)\] "(?<method>GET|POST) (?<url>.*?) HTTP.*?" \d+ \d+ ".*?" "(?<agent>.*?)"$/'; if (preg_match($p, $line, $m)) { if (preg_match('/(<script>|alert\(|onerror=)/i', urldecode($m['url']))) return ['type' => 'xss_attack', 'ts' => $m['ts'], 'ip' => $m['ip'], 'msg' => $line, 'ua_info' => analyze_user_agent($m['agent']), 'url' => $m['url'], 'details' => ['type' => 'Potential Attack', 'subtype' => 'XSS Attempt', 'desc' => 'تلاش برای حمله XSS.', 'miti' => 'خروجی‌ها را با `htmlspecialchars` پاکسازی کنید.']]; } return null; }],
+        'content_scan'      => ['label' => 'اسکن محتوای سایت', 'parser' => function($line) { return null; }], // Virtual parser
     ];
-    foreach ($patterns as $parser_function) { $parsed = $parser_function($line); if ($parsed) return $parsed; } return null;
 }
 
-/**
- * [بهبود یافته] توابع تشخیص حمله با توضیحات و هایلایت
- */
-function detect_attack_from_waf_log($message) {
-    $definitions = [
-        ['type' => 'WAF Block', 'subtype' => 'Sensitive File Access', 'pattern' => '/Matched phrase "(\/\.env|\/\.git|\/wp-config\.php|sftp-config\.json|\/app\/etc\/local\.xml|\.bak)"/i', 'description' => 'فایروال دسترسی به یک فایل حساس را مسدود کرده است.', 'mitigation' => 'فایروال به درستی کار کرده است. اطمینان حاصل کنید که این فایل‌ها خارج از پوشه public_html قرار دارند.', 'explanation' => 'حمله "دسترسی به فایل حساس" زمانی رخ می‌دهد که مهاجم تلاش می‌کند فایل‌های پیکربندی یا حیاتی سرور را مستقیماً دانلود کند تا به اطلاعاتی مانند رمز عبور دیتابیس دست یابد.'],
-        ['type' => 'WAF Block', 'subtype' => 'PHP Injection', 'pattern' => '/(COMODO WAF: PHP Injection Attack|php:\/\/input)/i', 'description' => 'فایروال یک تلاش بسیار خطرناک برای تزریق کد PHP را مسدود کرده است.', 'mitigation' => 'فایروال به درستی عمل کرده است. کد خود را برای هرگونه آسیب‌پذیری RCE (اجرای کد از راه دور) بازبینی کنید.', 'explanation' => 'در این حمله، مهاجم تلاش می‌کند کدهای PHP مخرب را مستقیماً در ورودی‌های برنامه شما تزریق و اجرا کند تا کنترل سرور را به دست بگیرد. این یکی از خطرناک‌ترین حملات است.'],
-    ];
-    foreach ($definitions as $def) {
-        if (preg_match($def['pattern'], $message, $matches)) {
-            if (isset($matches[1])) {
-                $def['description'] = str_replace('یک فایل حساس', 'فایل حساس "'.htmlspecialchars($matches[1]).'"', $def['description']);
-                $def['matched_pattern'] = $matches[1]; // بخش قابل هایلایت
+function analyze_user_agent($agent) { if (empty($agent) || $agent === '-') return null; if (stripos($agent, 'Googlebot') !== false) return ['type' => 'Good Bot', 'name' => 'Googlebot', 'icon' => '🟢']; if (stripos($agent, 'Bingbot') !== false) return ['type' => 'Good Bot', 'name' => 'Bingbot', 'icon' => '🟢']; if (stripos($agent, 'sqlmap') !== false) return ['type' => 'Attack Tool', 'name' => 'SQLMap', 'icon' => '🔴']; if (stripos($agent, 'nikto') !== false) return ['type' => 'Attack Tool', 'name' => 'Nikto', 'icon' => '🔴']; if (stripos($agent, 'nmap') !== false) return ['type' => 'Attack Tool', 'name' => 'Nmap', 'icon' => '🔴']; return ['type' => 'Browser', 'name' => substr($agent, 0, 40).'...', 'icon' => '']; }
+function parse_line($line, $enabled_filters) { $line = trim($line); if (empty($line)) return null; $all_parsers = get_all_parsers(); foreach ($enabled_filters as $key) { if ($key === 'content_scan') continue; if (isset($all_parsers[$key])) { if ($parsed = $all_parsers[$key]['parser']($line)) return $parsed; } } return null; }
+function get_country_from_ip($ip) { static $cache = []; if (isset($cache[$ip])) { return $cache[$ip]; } if (!filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE)) { return ['name' => 'N/A', 'code' => '']; } if (!function_exists('curl_init')) { return ['name' => 'cURL needed', 'code' => '']; } $url = "http://ip-api.com/json/{$ip}?fields=status,country,countryCode"; $ch = curl_init(); curl_setopt_array($ch, [CURLOPT_URL => $url, CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 3, CURLOPT_CONNECTTIMEOUT => 3]); $response = curl_exec($ch); curl_close($ch); if ($response) { $data = json_decode($response, true); if ($data && $data['status'] === 'success') { $cache[$ip] = ['name' => htmlspecialchars($data['country']), 'code' => htmlspecialchars($data['countryCode'])]; return $cache[$ip]; } } $cache[$ip] = ['name' => 'Unknown', 'code' => '']; return $cache[$ip]; }
+function country_code_to_emoji($code) { if (empty($code)) return '🌍'; $code = strtoupper($code); $a = 0x1F1E6; return mb_convert_encoding('&#' . ($a + ord($code[0]) - 65) . ';', 'UTF-8', 'HTML-ENTITIES') . mb_convert_encoding('&#' . ($a + ord($code[1]) - 65) . ';', 'UTF-8', 'HTML-ENTITIES'); }
+
+// --- ٣. پردازش و تجمیع داده‌ها ---
+$all_parsers = get_all_parsers();
+$enabled_filters = isset($_GET['filters']) && is_array($_GET['filters']) ? $_GET['filters'] : array_keys($all_parsers);
+$search_term = isset($_GET['search']) ? trim($_GET['search']) : '';
+$stats = ['total_lines' => 0, 'total_events' => 0, 'event_counts' => []];
+$all_logs = []; $ip_counts = [];
+$safe_event_types = ['system_event', 'seo_warning'];
+$hourly_events = array_fill(0, 24, 0); $top_urls = [];
+$country_cache = [];
+
+foreach ($logFiles as $logFile) {
+    if (file_exists($logFile) && is_readable($logFile)) {
+        if ($handle = fopen($logFile, "r")) {
+            while (($line = fgets($handle)) !== false) {
+                $stats['total_lines']++;
+                $parsed = parse_line($line, $enabled_filters);
+                if ($parsed && !empty($parsed['details'])) {
+                    $all_logs[] = $parsed;
+                }
             }
-            return $def;
+            fclose($handle);
         }
     }
-    return null;
 }
-function detect_attack_from_access_log($url) {
-    $decoded_url = urldecode($url);
-    $definitions = [
-        ['type' => 'Potential Attack', 'subtype' => 'Path Traversal', 'pattern' => '/(\.\.\/|%2e%2e%2f)/i', 'description' => 'تلاش برای پیمایش مسیر (Path Traversal) شناسایی شد.', 'mitigation' => 'تمام ورودی‌های کاربر که برای دسترسی به فایل‌ها استفاده می‌شود را به دقت اعتبارسنجی کنید.', 'explanation' => 'در حمله "پیمایش مسیر"، مهاجم با استفاده از الگوی `../` تلاش می‌کند از دایرکتوری وب‌سایت شما خارج شده و به فایل‌های حساس سیستم‌عامل (مانند `/etc/passwd`) دسترسی پیدا کند.'],
-        ['type' => 'Potential Attack', 'subtype' => 'SQL Injection', 'pattern' => '/\b(union|select|insert|concat|from|where|--|;)\b/i', 'description' => 'تلاش برای تزریق SQL شناسایی شد.', 'mitigation' => 'همیشه از Prepared Statements (با PDO یا MySQLi) برای کار با دیتابیس استفاده کنید.', 'explanation' => 'در حمله "تزریق SQL"، مهاجم تلاش می‌کند با وارد کردن دستورات SQL در ورودی‌های برنامه (مانند فرم‌ها یا URL)، کوئری‌های دیتابیس شما را دستکاری کرده و به اطلاعات جداول دسترسی پیدا کند یا آن‌ها را تخریب کند.'],
-        ['type' => 'Potential Attack', 'subtype' => 'XSS Attempt', 'pattern' => '/(<script>|alert\(|onerror=)/i', 'description' => 'تلاش برای حمله XSS شناسایی شد.', 'mitigation' => 'تمام خروجی‌هایی که در صفحه HTML نمایش می‌دهید را با تابع `htmlspecialchars` پاکسازی کنید.', 'explanation' => 'در حمله "Cross-Site Scripting" یا XSS، مهاجم تلاش می‌کند کدهای جاوا اسکریپت مخرب را در وب‌سایت شما تزریق کند تا این کدها در مرورگر کاربران دیگر اجرا شده و اطلاعات آن‌ها (مانند کوکی‌ها) به سرقت برود.'],
-    ];
-    foreach ($definitions as $def) {
-        if (preg_match($def['pattern'], $decoded_url, $matches)) {
-            $def['matched_pattern'] = $matches[0]; // بخش قابل هایلایت
-            return $def;
-        }
+
+// <<< اصلاح شد: جستجوی سراسری قبل از هر پردازش دیگری >>>
+if (!empty($search_term)) {
+    $all_logs = array_filter($all_logs, function($log) use ($search_term) {
+        return stripos($log['msg'], $search_term) !== false;
+    });
+}
+
+// پردازش آمارها پس از فیلتر و جستجو
+foreach($all_logs as &$log) {
+    $stats['total_events']++;
+    $type = $log['details']['type'];
+    $stats['event_counts'][$type] = ($stats['event_counts'][$type] ?? 0) + 1;
+    
+    if (!empty($log['ip']) && !in_array($log['ip'], ['LOCAL', 'SYSTEM', 'CRITICAL', 'HARDWARE', 'SERVICE', '::1']) && !in_array($log['type'], $safe_event_types)) {
+        $ip_counts[$log['ip']] = ($ip_counts[$log['ip']] ?? 0) + 1;
     }
-    return null;
+    
+    $log['ts_unix'] = isset($log['ts']) ? strtotime(str_replace(['/',' '], ':', $log['ts'])) : time();
+
+    if ($log['ts_unix'] > strtotime('-24 hours')) {
+        $hour = date('H', $log['ts_unix']);
+        $hourly_events[(int)$hour]++;
+    }
+    if (isset($log['url'])) {
+        $url = strtok($log['url'], '?');
+        $top_urls[$url] = ($top_urls[$url] ?? 0) + 1;
+    }
 }
+unset($log);
 
-// ... توابع get_country_from_ip و country_code_to_emoji بدون تغییر ...
-function get_country_from_ip($ip) { static $cache = []; if (isset($cache[$ip])) { return $cache[$ip]; } if (!filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE)) { return 'N/A'; } if (!function_exists('curl_init')) { return 'cURL needed'; } $url = "http://ip-api.com/json/{$ip}?fields=status,country,countryCode"; $ch = curl_init(); curl_setopt($ch, CURLOPT_URL, $url); curl_setopt($ch, CURLOPT_RETURNTRANSFER, true); curl_setopt($ch, CURLOPT_TIMEOUT, 3); curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 2); $response = curl_exec($ch); if (curl_errno($ch)) { $response = false; } curl_close($ch); if ($response !== false) { $data = json_decode($response, true); if (json_last_error() === JSON_ERROR_NONE && isset($data['status']) && $data['status'] === 'success' && isset($data['countryCode'])) { $country_code = htmlspecialchars($data['countryCode']); $country_name = htmlspecialchars($data['country']); $cache[$ip] = country_code_to_emoji($country_code) . ' ' . $country_name; return $cache[$ip]; } } return $cache[$ip] = 'Unknown'; }
-function country_code_to_emoji($code) { if (empty($code) || strlen($code) !== 2) { return '🌍'; } $code = strtoupper($code); $regional_indicator_a = 0x1F1E6; $offset = ord('A'); $emoji = mb_convert_encoding('&#'.($regional_indicator_a + (ord($code[0]) - $offset)).';', 'UTF-8', 'HTML-ENTITIES'); $emoji .= mb_convert_encoding('&#'.($regional_indicator_a + (ord($code[1]) - $offset)).';', 'UTF-8', 'HTML-ENTITIES'); return $emoji; }
-
-// ... پردازش اصلی بدون تغییر ...
-$stats = ['total_lines' => 0, 'total_attacks' => 0, 'attack_counts' => []]; $all_logs = []; $ip_counts = [];
-foreach ($logFiles as $logFile) { if (file_exists($logFile) && is_readable($logFile)) { $lines = file($logFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES); $stats['total_lines'] += count($lines); foreach ($lines as $line) { $parsed = parse_line($line); if ($parsed && !empty($parsed['attack_details'])) { $stats['total_attacks']++; $type = $parsed['attack_details']['type']; $stats['attack_counts'][$type] = ($stats['attack_counts'][$type] ?? 0) + 1; if(!empty($parsed['ip'])) { $ip_counts[$parsed['ip']] = ($ip_counts[$parsed['ip']] ?? 0) + 1; } $all_logs[] = $parsed; } } } }
-usort($all_logs, function($a, $b) { return ($b['timestamp_unix'] ?? 0) <=> ($a['timestamp_unix'] ?? 0); });
+usort($all_logs, function($a, $b) { return $b['ts_unix'] <=> $a['ts_unix']; });
 arsort($ip_counts);
+arsort($top_urls);
+$top_urls = array_slice($top_urls, 0, 10);
 
+// --- ٤. آماده‌سازی داده‌ها برای نمودارهای Google Charts ---
+$map_data = [];
+$top_attackers_slice = array_slice($ip_counts, 0, 20, true);
+foreach (array_keys($top_attackers_slice) as $ip) {
+    if (!isset($country_cache[$ip])) {
+        $country_cache[$ip] = get_country_from_ip($ip);
+    }
+    $country_info = $country_cache[$ip];
+    if ($country_info['code']) {
+        $map_data[$country_info['code']] = ($map_data[$country_info['code']] ?? 0) + $ip_counts[$ip];
+    }
+}
+
+$geochart_data = [['Country', 'Events']];
+foreach ($map_data as $code => $count) { $geochart_data[] = [$code, $count]; }
+$geochart_data_json = json_encode($geochart_data);
+
+$piechart_data = [['Type', 'Count']];
+if (!empty($stats['event_counts'])) { foreach ($stats['event_counts'] as $type => $count) { $piechart_data[] = [$type, $count]; } }
+$piechart_data_json = json_encode($piechart_data);
+
+$timechart_data = [['Hour', 'Events']];
+for ($i=0; $i<24; $i++) { $timechart_data[] = [sprintf('%02d:00', $i), $hourly_events[$i]]; }
+$timechart_data_json = json_encode($timechart_data);
+
+$barchart_data = [['URL', 'Hits']];
+if (!empty($top_urls)) { foreach ($top_urls as $url => $count) { $barchart_data[] = [htmlspecialchars($url), $count]; } }
+$barchart_data_json = json_encode($barchart_data);
+
+$total_events = count($all_logs);
+$total_pages = ceil($total_events / $events_per_page);
+$current_page = isset($_GET['page']) ? (int)$_GET['page'] : 1;
+$current_page = max(1, min($total_pages, $current_page));
+$offset = ($current_page - 1) * $events_per_page;
+$paginated_logs = array_slice($all_logs, $offset, $events_per_page);
+
+// پارامترهای فعلی برای حفظ در لینک‌ها
+$current_params = $_GET;
 ?>
 <!DOCTYPE html>
-<html lang="fa" dir="rtl">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>تحلیلگر جامع لاگ سرور</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<html lang="fa" dir="rtl"><head>
+    <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>داشبورد امنیتی و تحلیلگر لاگ سرور</title>
     <link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@400;700&display=swap" rel="stylesheet">
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
-        :root { 
-            --color-bg: #f4f7f9; --color-card: #ffffff; --color-text: #333333; --color-primary: #007bff; 
-            --color-border: #e0e5eb; --color-danger: #dc3545; --color-warning: #fd7e14; 
-            --color-system-critical: #721c24; --color-system-warning: #856404; --color-system-event: #495057;   
-        } 
-        body { font-family: 'Vazirmatn', sans-serif; background-color: var(--color-bg); color: var(--color-text); margin: 0; padding: 20px; line-height: 1.6; }
-        .container { max-width: 1200px; margin: 0 auto; }
+        :root { --color-bg: #f4f7f9; --color-card: #ffffff; --color-text: #333333; --color-primary: #007bff; --color-border: #e0e5eb; --color-danger: #dc3545; --color-warning: #fd7e14; --color-system-critical: #721c24; --color-system-warning: #856404; --color-seo: #0dcaf0; }
+        body { font-family: 'Vazirmatn', sans-serif; background-color: var(--color-bg); color: var(--color-text); margin: 0; padding: 20px; }
+        .container { max-width: 1400px; margin: 0 auto; }
         .card { background-color: var(--color-card); padding: 25px; border-radius: 10px; box-shadow: 0 4px 15px rgba(0,0,0,0.05); margin-bottom: 25px; }
-        h1, h2 { color: var(--color-primary); border-bottom: 2px solid var(--color-border); padding-bottom: 10px; margin-top: 0; font-weight: 700; }
+        h1, h2 { color: var(--color-primary); border-bottom: 2px solid var(--color-border); padding-bottom: 10px; margin-top: 0; }
         .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 20px; }
         .stat-card { background-color: var(--color-bg); padding: 20px; border-radius: 8px; text-align: center; border: 1px solid var(--color-border); }
         .stat-card .number { font-size: 2.2em; font-weight: 700; color: var(--color-primary); }
-        .stat-card .label { font-size: 1em; color: #666; margin-top: 5px; }
+        .stat-card .label { font-size: 1em; color: #666; }
+        .dashboard-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(500px, 1fr)); gap: 25px; }
+        .chart-container { width: 100%; height: 450px; }
+        .tabs { border-bottom: 2px solid var(--color-border); margin-bottom: 25px; display: flex; flex-wrap: wrap; }
+        .tabs button { background-color: transparent; border: none; padding: 15px 20px; font-family: 'Vazirmatn', sans-serif; font-size: 1.1em; cursor: pointer; position: relative; color: #555; }
+        .tabs button.active { font-weight: 700; color: var(--color-primary); }
+        .tabs button.active::after { content: ''; position: absolute; bottom: -2px; left: 0; right: 0; height: 2px; background-color: var(--color-primary); }
+        .tab-content { display: none; }
+        .tab-content.active { display: block; }
         details { border-left: 5px solid #ccc; border-radius: 8px; margin-bottom: 15px; overflow: hidden; border: 1px solid var(--color-border); }
-        
         details[data-type="system_critical"] { border-left-color: var(--color-system-critical); background-color: #f8d7da; }
-        details[data-type="system_warning"], details[data-type="service_warning"] { border-left-color: var(--color-system-warning); background-color: #fff3cd; }
-        details[data-type="system_event"], details[data-type="system_security"] { border-left-color: var(--color-system-event); }
-        
+        details[data-type="system_warning"], details[data-type="correlated_event"], details[data-type="service_warning"] { border-left-color: var(--color-warning); background-color: #fff3cd; }
+        details[data-type="seo_warning"] { border-left-color: var(--color-seo); background-color: #cff4fc; }
         summary { padding: 15px; cursor: pointer; display: grid; grid-template-columns: 140px auto 180px; gap: 15px; align-items: center; font-size: 0.9em; background-color: #f8f9fa; }
-        summary:hover { background-color: #f1f3f5; }
         .summary-ip { font-weight: 700; color: var(--color-danger); font-family: monospace; }
-        .summary-ip[data-ip-type="CRITICAL"] { color: var(--color-system-critical); }
-        .summary-ip[data-ip-type="SYSTEM"] { color: var(--color-system-event); }
         .summary-msg { color: #444; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-        .summary-type { padding: 4px 10px; border-radius: 12px; font-size: 0.8em; text-align: center; font-weight: 700; }
+        .summary-type { font-weight: 700; }
         .attack-content { padding: 15px; background-color: #fff; }
-        .attack-content code { background-color: #e9ecef; padding: 10px; border-radius: 4px; direction: ltr; display: block; text-align: left; white-space: pre-wrap; word-wrap: break-word; font-size: 0.85em; margin-top: 5px; }
+        .attack-content code { background-color: #e9ecef; padding: 10px; border-radius: 4px; direction: ltr; display: block; text-align: left; white-space: pre-wrap; word-wrap: break-word; font-size: 0.85em; }
         .mitigation { background-color: #e3f2fd; border-right: 4px solid var(--color-primary); padding: 10px; margin-top: 10px; border-radius: 4px; }
         table { width: 100%; border-collapse: collapse; }
         th, td { text-align: right; padding: 12px; border-bottom: 1px solid var(--color-border); }
-        th { background-color: #f2f2f2; }
-        .htaccess-code { background-color: #e9ecef; color: #495057; padding: 5px 10px; border-radius: 4px; font-family: 'Courier New', Courier, monospace; direction: ltr; text-align: left; }
-        .charts-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 30px; align-items: center; }
-        
-        /* [جدید] استایل برای هایلایت و توضیحات */
-        .highlight {
-            background-color: #f8d7da;
-            color: #721c24;
-            padding: 2px 4px;
-            border-radius: 3px;
-            font-weight: bold;
-        }
-        .explanation-box {
-            background-color: #f0f7ff;
-            border-left: 4px solid #007bff;
-            padding: 10px;
-            margin-top: 15px;
-            border-radius: 4px;
-            font-size: 0.9em;
-        }
+        .block-code { background-color: #e9ecef; color: #495057; padding: 5px 10px; border-radius: 4px; font-family: monospace; direction: ltr; text-align: left; display:block; margin-top: 5px;}
+        .search-form { display: flex; gap: 10px; margin-bottom: 20px; }
+        .search-box { flex-grow: 1; box-sizing: border-box; padding: 12px; border: 1px solid var(--color-border); border-radius: 5px; font-family: 'Vazirmatn', sans-serif; }
+        .search-btn { background-color: var(--color-primary); color: white; border: none; padding: 12px 20px; border-radius: 5px; cursor: pointer; font-family: 'Vazirmatn', sans-serif; font-size: 1em; }
+        .clear-search-btn { background-color: #6c757d; text-decoration: none; display:inline-block; }
+        .pagination { text-align: center; margin-top: 20px; }
+        .pagination a { color: var(--color-primary); padding: 8px 16px; text-decoration: none; border: 1px solid var(--color-border); margin: 0 4px; border-radius: 5px; }
+        .pagination a.active { background-color: var(--color-primary); color: white; }
+        .footer-card { text-align: center; padding: 20px; margin-top: 25px; font-size: 0.9em; color: #555; }
+        .footer-card a { color: var(--color-primary); text-decoration: none; font-weight: bold; }
+        .filter-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; }
+        .filter-form label { display: flex; align-items: center; background-color: #f8f9fa; padding: 10px; border-radius: 5px; border: 1px solid var(--color-border); cursor: pointer; font-size: 0.9em; }
+        .filter-form input { margin-left: 10px; }
+        .filter-btn { background-color: var(--color-primary); color: white; border: none; padding: 12px; border-radius: 5px; cursor: pointer; font-family: 'Vazirmatn', sans-serif; font-size: 1em; grid-column: 1 / -1; }
     </style>
-</head>
-<body>
+</head><body>
     <div class="container">
-        <!-- بخش‌های آمار کلی، نمودارها و جدول مهاجمان برتر بدون تغییر -->
-        <h1>تحلیلگر جامع لاگ سرور</h1>
+        <h1>داشبورد امنیتی و تحلیلگر لاگ سرور</h1>
+        
         <div class="card">
             <h2>آمار کلی</h2>
             <div class="stats-grid">
                 <div class="stat-card"><div class="number"><?php echo number_format($stats['total_lines']); ?></div><div class="label">کل خطوط خوانده شده</div></div>
-                <div class="stat-card"><div class="number" style="color:var(--color-danger)"><?php echo number_format($stats['total_attacks']); ?></div><div class="label">رویدادهای امنیتی</div></div>
-                <?php foreach($stats['attack_counts'] as $type => $count): ?>
+                <div class="stat-card"><div class="number" style="color:var(--color-danger)"><?php echo number_format($stats['total_events']); ?></div><div class="label">رویدادهای نمایش داده شده</div></div>
+                <?php foreach($stats['event_counts'] as $type => $count): ?>
                     <div class="stat-card"><div class="number"><?php echo number_format($count); ?></div><div class="label"><?php echo htmlspecialchars($type); ?></div></div>
                 <?php endforeach; ?>
             </div>
         </div>
-        <?php if (!empty($stats['attack_counts']) && !empty($ip_counts)): ?>
-        <div class="card">
-            <h2>گزارش‌های نموداری</h2>
-            <div class="charts-grid">
-                <div><canvas id="attackTypesChart"></canvas></div>
-                <div><canvas id="topAttackersChart"></canvas></div>
+
+        <div class="tabs">
+            <button class="tab-button active" onclick="openTab(event, 'events')">رویدادهای زنده</button>
+            <button class="tab-button" onclick="openTab(event, 'stats')">آمارها</button>
+            <button class="tab-button" onclick="openTab(event, 'attackers')">مهاجمان برتر</button>
+        </div>
+
+        <div id="events" class="tab-content active">
+            <div class="card">
+                <h2>فیلتر و جستجو</h2>
+                <form method="GET" action="">
+                    <div class="search-form">
+                        <input type="text" name="search" class="search-box" placeholder="جستجو در تمام رویدادها..." value="<?php echo htmlspecialchars($search_term); ?>">
+                        <button type="submit" class="search-btn">جستجو</button>
+                        <?php if (!empty($search_term)):
+                            unset($current_params['search']);
+                            $clear_url = '?' . http_build_query($current_params);
+                        ?>
+                            <a href="<?php echo $clear_url; ?>" class="search-btn clear-search-btn">پاک کردن جستجو</a>
+                        <?php endif; ?>
+                    </div>
+                    <div class="filter-form">
+                        <?php foreach ($all_parsers as $key => $details): ?>
+                            <label><input type="checkbox" name="filters[]" value="<?php echo $key; ?>" <?php echo in_array($key, $enabled_filters) ? 'checked' : ''; ?>> <?php echo htmlspecialchars($details['label']); ?></label>
+                        <?php endforeach; ?>
+                    </div>
+                    <br><button type="submit" class="filter-btn">اعمال فیلترها</button>
+                </form>
+            </div>
+            <div class="card">
+                <h2>جزئیات رویدادها (<?php echo $total_events; ?> مورد)</h2>
+                <div id="log-details-list">
+                    <?php if (empty($paginated_logs)): ?>
+                        <p>هیچ رویدادی مطابق با فیلترها یا جستجوی شما یافت نشد.</p>
+                    <?php else: foreach ($paginated_logs as $log): ?>
+                        <details data-type="<?php echo htmlspecialchars($log['type'] ?? 'unknown'); ?>" class="log-item">
+                            <summary>
+                                <span class="summary-ip"><?php echo htmlspecialchars($log['ip']); ?></span>
+                                <span class="summary-msg" title="<?php echo htmlspecialchars($log['msg']); ?>"><?php echo htmlspecialchars($log['details']['desc']); ?></span>
+                                <span class="summary-type"><?php echo htmlspecialchars($log['details']['subtype']); ?></span>
+                            </summary>
+                            <div class="attack-content">
+                                <p><strong>نوع رویداد:</strong> <?php echo htmlspecialchars($log['details']['type']); ?><br><strong>زمان:</strong> <?php echo htmlspecialchars($log['ts']); ?><br>
+                                <?php if(isset($log['ua_info']) && is_array($log['ua_info'])): ?><strong>User-Agent:</strong> <?php echo $log['ua_info']['icon']; ?> <?php echo htmlspecialchars($log['ua_info']['name']); ?><br><?php endif; ?></p>
+                                <p><strong>پیام کامل لاگ:</strong><br><code><?php echo htmlspecialchars($log['msg']); ?></code></p>
+                                <div class="mitigation"><strong>راهکار پیشنهادی:</strong><br><?php echo ($log['details']['miti']); ?></div>
+                            </div>
+                        </details>
+                    <?php endforeach; endif; ?>
+                </div>
+                <div class="pagination">
+                    <?php for ($i = 1; $i <= $total_pages; $i++):
+                        $page_params = $current_params;
+                        $page_params['page'] = $i;
+                    ?><a href="?<?php echo http_build_query($page_params); ?>" class="<?php echo ($i == $current_page) ? 'active' : ''; ?>"><?php echo $i; ?></a><?php endfor; ?>
+                </div>
             </div>
         </div>
-        <?php endif; ?>
-        <div class="card">
-            <h2>مهاجمان برتر (Top 10 IPs)</h2>
-            <?php if (empty($ip_counts)): ?>
-                <p>هیچ مهاجمی با IP شناسایی نشد.</p>
-            <?php else: ?>
-            <table>
-                <thead><tr><th>IP آدرس</th><th>کشور</th><th>تعداد رویداد</th><th>دستور مسدودسازی</th></tr></thead>
-                <tbody>
-                    <?php foreach(array_slice($ip_counts, 0, 10) as $ip => $count): ?>
+
+        <div id="stats" class="tab-content">
+            <div class="dashboard-grid">
+                <div class="card"><h2>نقشه جغرافیایی حملات</h2><div id="world-map" class="chart-container"></div></div>
+                <div class="card"><h2>رویدادها در ٢٤ ساعت گذشته</h2><div id="time-chart" class="chart-container"></div></div>
+                <div class="card"><h2>درصد انواع رویدادها</h2><div id="pie-chart" class="chart-container"></div></div>
+                <div class="card"><h2>١٠ آدرس پرتکرار در حملات</h2><div id="bar-chart" class="chart-container"></div></div>
+            </div>
+        </div>
+        
+        <div id="attackers" class="tab-content">
+            <div class="card"><h2>مهاجمان برتر</h2><table>
+                <thead><tr><th>IP آدرس</th><th>کشور</th><th>تعداد رویداد</th><th>دستورات مسدودسازی</th></tr></thead>
+                <tbody><?php foreach($top_attackers_slice as $ip => $count): $country_info = $country_cache[$ip] ?? get_country_from_ip($ip); ?>
                     <tr>
-                        <td><?php echo htmlspecialchars($ip); ?></td>
-                        <td><?php echo get_country_from_ip($ip); ?></td>
+                        <td><a href="?search=<?php echo urlencode($ip); ?>"><?php echo htmlspecialchars($ip); ?></a></td>
+                        <td><?php echo country_code_to_emoji($country_info['code']); ?> <?php echo $country_info['name']; ?></td>
                         <td><?php echo number_format($count); ?></td>
-                        <td><code class="htaccess-code">deny from <?php echo htmlspecialchars($ip); ?></code></td>
+                        <td>
+                            <code class="block-code">ufw deny from <?php echo htmlspecialchars($ip); ?></code>
+                            <code class="block-code">csf -d <?php echo htmlspecialchars($ip); ?> "Log Analyzer Block"</code>
+                            <code class="block-code">fail2ban-client set YOUR_JAIL_NAME banip <?php echo htmlspecialchars($ip); ?></code>
+                        </td>
                     </tr>
-                    <?php endforeach; ?>
-                </tbody>
-            </table>
-            <?php endif; ?>
+                <?php endforeach; ?></tbody>
+            </table></div>
         </div>
-
-        <!-- [بهبود یافته] بخش جزئیات رویدادها -->
-        <div class="card">
-            <h2>جزئیات رویدادهای امنیتی (مرتب شده بر اساس زمان)</h2>
-            <?php if (empty($all_logs)): ?>
-                <p>هیچ رویداد امنیتی در لاگ‌ها یافت نشد.</p>
-            <?php else: ?>
-                <?php foreach ($all_logs as $log): ?>
-                    <details data-type="<?php echo $log['type']; ?>">
-                        <summary>
-                            <span class="summary-ip" data-ip-type="<?php echo htmlspecialchars($log['ip'] ?? 'SYSTEM'); ?>"><?php echo htmlspecialchars($log['ip'] ?? 'SYSTEM'); ?></span>
-                            <span class="summary-msg" title="<?php echo htmlspecialchars($log['full_log_message']); ?>"><?php echo htmlspecialchars($log['attack_details']['description']); ?></span>
-                            <span class="summary-type"><?php echo htmlspecialchars($log['attack_details']['subtype']); ?></span>
-                        </summary>
-                        <div class="attack-content">
-                            <p><strong>نوع رویداد:</strong> <?php echo htmlspecialchars($log['attack_details']['type']); ?><br><strong>زمان:</strong> <?php echo htmlspecialchars($log['timestamp']); ?><br></p>
-                            
-                            <p><strong>پیام کامل لاگ (بخش خطرناک هایلایت شده است):</strong><br>
-                                <code><?php
-                                    $full_log = htmlspecialchars($log['full_log_message']);
-                                    if (!empty($log['attack_details']['matched_pattern'])) {
-                                        $pattern = htmlspecialchars($log['attack_details']['matched_pattern']);
-                                        $highlighted = '<span class="highlight">' . $pattern . '</span>';
-                                        // برای جلوگیری از هایلایت شدن موارد مشابه در بخش‌های دیگر لاگ، از preg_quote استفاده می‌کنیم
-                                        echo preg_replace('/' . preg_quote($pattern, '/') . '/', $highlighted, $full_log, 1);
-                                    } else {
-                                        echo $full_log;
-                                    }
-                                ?></code>
-                            </p>
-
-                            <?php if (!empty($log['attack_details']['explanation'])): ?>
-                                <div class="explanation-box">
-                                    <strong>این حمله چیست؟</strong><br>
-                                    <?php echo htmlspecialchars($log['attack_details']['explanation']); ?>
-                                </div>
-                            <?php endif; ?>
-
-                            <div class="mitigation">
-                                <strong>راهکار پیشنهادی:</strong><br>
-                                <?php echo htmlspecialchars($log['attack_details']['mitigation']); ?>
-                            </div>
-                        </div>
-                    </details>
-                <?php endforeach; ?>
-            <?php endif; ?>
-        </div>
+        
+        <div class="footer-card"><p>این ابزار متن‌باز با ❤️ توسط <a href="https://blueserver.ir/author/iraj-zahedi/" target="_blank">ایرج زاهدی</a> برای <a href="https://blueserver.ir/" target="_blank">بلوسرور</a> توسعه داده شده است.</p></div>
     </div>
+    
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+    <script type="text/javascript" src="https://www.gstatic.com/charts/loader.js"></script>
+    <script type="text/javascript">
+        function openTab(evt, tabName) {
+            var i, tabcontent, tablinks;
+            tabcontent = document.getElementsByClassName("tab-content");
+            for (i = 0; i < tabcontent.length; i++) {
+                tabcontent[i].style.display = "none";
+            }
+            tablinks = document.getElementsByClassName("tab-button");
+            for (i = 0; i < tablinks.length; i++) {
+                tablinks[i].className = tablinks[i].className.replace(" active", "");
+            }
+            document.getElementById(tabName).style.display = "block";
+            evt.currentTarget.className += " active";
 
-    <!-- اسکریپت نمودارها بدون تغییر -->
-    <?php if (!empty($stats['attack_counts']) && !empty($ip_counts)): ?>
-    <script>
-        document.addEventListener('DOMContentLoaded', function () {
-            const attackCountsData = <?php echo json_encode(array_values($stats['attack_counts'])); ?>;
-            const attackCountsLabels = <?php echo json_encode(array_keys($stats['attack_counts'])); ?>;
-            const topIpsData = <?php echo json_encode(array_values(array_slice($ip_counts, 0, 10))); ?>;
-            const topIpsLabels = <?php echo json_encode(array_keys(array_slice($ip_counts, 0, 10))); ?>;
+            if (tabName === 'stats') {
+                setTimeout(function() {
+                    drawCharts();
+                }, 10);
+            }
+        }
 
-            const ctxTypes = document.getElementById('attackTypesChart').getContext('2d');
-            new Chart(ctxTypes, { type: 'doughnut', data: { labels: attackCountsLabels, datasets: [{ label: 'تعداد رویداد', data: attackCountsData, backgroundColor: ['#dc3545', '#fd7e14', '#ffc107', '#20c997', '#0dcaf0', '#6f42c1', '#d63384', '#721c24', '#495057'], borderColor: '#fff', borderWidth: 2, hoverOffset: 8 }] }, options: { responsive: true, plugins: { legend: { position: 'bottom', labels: { fontFamily: 'Vazirmatn' } }, title: { display: true, text: 'توزیع انواع رویدادهای امنیتی', font: { size: 16, family: 'Vazirmatn' } } } } });
-            
-            const ctxAttackers = document.getElementById('topAttackersChart').getContext('2d');
-            new Chart(ctxAttackers, { type: 'bar', data: { labels: topIpsLabels, datasets: [{ label: 'تعداد حملات', data: topIpsData, backgroundColor: 'rgba(0, 123, 255, 0.7)', borderColor: 'rgba(0, 123, 255, 1)', borderWidth: 1, borderRadius: 4 }] }, options: { responsive: true, indexAxis: 'y', scales: { y: { ticks: { font: { family: 'monospace' } } }, x: { beginAtZero: true } }, plugins: { legend: { display: false }, title: { display: true, text: '۱۰ مهاجم برتر بر اساس IP', font: { size: 16, family: 'Vazirmatn' } } } } });
-        });
+        google.charts.load('current', {'packages':['geochart', 'corechart']});
+        google.charts.setOnLoadCallback(drawCharts);
+
+        function drawCharts() {
+            try { drawRegionsMap(); } catch(e) { console.error("Could not draw GeoChart:", e); }
+            try { drawPieChart(); } catch(e) { console.error("Could not draw PieChart:", e); }
+            try { drawTimeChart(); } catch(e) { console.error("Could not draw TimeChart:", e); }
+            try { drawBarChart(); } catch(e) { console.error("Could not draw BarChart:", e); }
+        }
+
+        function drawRegionsMap() {
+            var data = google.visualization.arrayToDataTable(<?php echo $geochart_data_json; ?>);
+            if (data.getNumberOfRows() === 0) return;
+            var options = { colorAxis: {colors: ['#E6F2F8', '#0071A4']}, backgroundColor: 'transparent', datalessRegionColor: '#f0f0f0' };
+            var chart = new google.visualization.GeoChart(document.getElementById('world-map'));
+            chart.draw(data, options);
+        }
+
+        function drawPieChart() {
+            var data = google.visualization.arrayToDataTable(<?php echo $piechart_data_json; ?>);
+            if (data.getNumberOfRows() === 0) return;
+            var options = {
+                title: 'تفکیک انواع رویدادها',
+                is3D: true,
+                backgroundColor: 'transparent',
+                legend: { textStyle: { color: '#333' } },
+                titleTextStyle: { color: '#333' },
+                chartArea: {'width': '90%', 'height': '80%'}
+            };
+            var chart = new google.visualization.PieChart(document.getElementById('pie-chart'));
+            chart.draw(data, options);
+        }
+
+        function drawTimeChart() {
+            var data = google.visualization.arrayToDataTable(<?php echo $timechart_data_json; ?>);
+            if (data.getNumberOfRows() === 0) return;
+            var options = {
+                title: 'تعداد رویدادها در ساعت',
+                curveType: 'function',
+                legend: { position: 'bottom' },
+                backgroundColor: 'transparent',
+                hAxis: { textStyle: { color: '#333' }, slantedText: true, slantedTextAngle: 45 },
+                vAxis: { textStyle: { color: '#333' } },
+                titleTextStyle: { color: '#333' },
+                chartArea: {'width': '85%', 'height': '75%'}
+            };
+            var chart = new google.visualization.LineChart(document.getElementById('time-chart'));
+            chart.draw(data, options);
+        }
+
+        function drawBarChart() {
+            var data = google.visualization.arrayToDataTable(<?php echo $barchart_data_json; ?>);
+            if (data.getNumberOfRows() === 0) return;
+            var options = {
+                title: 'آدرس‌های پرتکرار',
+                legend: { position: 'none' },
+                backgroundColor: 'transparent',
+                hAxis: { textStyle: { color: '#333' } },
+                vAxis: { textStyle: { color: '#333' } },
+                titleTextStyle: { color: '#333' },
+                chartArea: {'width': '80%', 'height': '80%'}
+            };
+            var chart = new google.visualization.BarChart(document.getElementById('bar-chart'));
+            chart.draw(data, options);
+        }
     </script>
-    <?php endif; ?>
-</body>
-</html>
+</body></html>
