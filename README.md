@@ -100,6 +100,105 @@
 
 ---
 
+### درباره توسعه‌دهنده
+
+این افزونه توسط [ایرج زاهدی](https://blueserver.ir/author/iraj-zahedi)، بنیان‌گذار و متخصص فنی زیرساخت در [بلوسرور](https://blueserver.ir/)، توسعه داده شده است. تخصص ما در ارائه راهکارهای میزبانی بهینه و امن برای وردپرس است و این ابزار حاصل تجربه ما در این زمینه است.
 
 برای آشنایی کامل‌تر با این ابزار، مطالعه مقاله زیر را در سایت بلوسرور توصیه می‌کنیم:
 [تحلیلگر لاگ سرور با PHP – ابزار متن‌باز بلوسرور برای امنیت و مانیتورینگ](https://blueserver.ir/blueserver-php-log-analyzer)
+
+
+
+
+
+A powerful, lightweight, **single-file** PHP script for real-time analysis of Linux server logs. This tool helps you quickly identify attacks, system errors, and security events through an interactive, graphical dashboard.
+
+This analyzer works without a database, Composer, or any external dependencies, making it ideal for server administrators, web developers, and security specialists.
+
+---
+
+## ✨ Key Features
+
+### 1. Interactive & Smart Dashboard
+-   **Tab-based Interface:** Cleanly separates reports into "Live Events," "Statistics," and "Top Attackers."
+-   **Powerful Global Search:** Instantly search for any term (like an IP address or error message) across **all** configured log files.
+-   **Graphical Charts (Google Charts):** Visualize your data, including a geo-map of attack origins, an event timeline for the last 24 hours, and a breakdown of event types.
+-   **Smart, Clickable Links:** Click directly on an attacker's IP to view a comprehensive list of all their logged activities.
+-   **Advanced Filtering:** Easily toggle the visibility of specific log types to focus on what matters.
+
+### 2. Comprehensive Security Analysis
+-   **Web Server (Apache):** Detects access errors, SSL negotiation issues, and PHP-FPM-related faults.
+-   **Web Application Firewall (ModSecurity):** Displays attacks that have been identified and blocked by the WAF.
+-   **Services (SSH, Email):** Identifies Brute-Force attacks against SSH and email servers (Dovecot/Exim).
+-   **Security Software (Fail2ban):** Monitors Fail2ban's performance, showing banned/unbanned IPs and any operational errors.
+-   **Web Attacks:** Detects common attack attempts like SQL Injection, XSS, Path Traversal, and Command Injection.
+
+### 3. System Health Monitoring
+-   **Critical Kernel Errors:** Identifies Kernel Panics and hardware I/O errors that may indicate serious server issues.
+-   **Resource Management:** Detects out-of-memory problems (OOM Killer) and processes that were forcibly terminated.
+-   **System Events:** Logs server reboots and the use of privileged commands (Sudo).
+
+---
+
+## 🚀 Installation & Setup
+
+Setup is incredibly simple. Just upload and configure a single file.
+
+### Prerequisites
+-   A Linux server (VPS or Dedicated).
+-   PHP version 7.0 or higher.
+-   SSH access to the server.
+
+### Installation Steps
+
+1.  **Upload the Script:** Upload the `log_analyzer.php` file to your desired path on the server (e.g., within a subdomain like `analyzer.yourdomain.com`).
+
+2.  **Configure Log Paths:** Open the script and, in the configuration section, edit the `$logFiles` array to match your server's operating system. **Uncomment the lines corresponding to the logs that exist on your server:**
+    ```php
+    $logFiles = [
+        // Example for a CentOS/RHEL server with Apache
+        '/var/log/httpd/access_log',
+        '/var/log/httpd/error_log',
+        '/var/log/secure',
+        '/var/log/messages',
+        '/var/log/maillog',
+        '/var/log/fail2ban.log',
+
+        // Example for a Debian/Ubuntu server with Apache
+        // '/var/log/apache2/access.log',
+        // '/var/log/apache2/error.log',
+        // '/var/log/auth.log',
+        // '/var/log/syslog',
+    ];
+    ```
+
+3.  **Set Permissions (Crucial Step):**
+    Your web server user (typically `apache` on CentOS or `www-data` on Ubuntu) needs permission to read these files. Run the following commands via SSH:
+    
+    > **Note:** If `setfacl` is not installed, use `sudo yum install acl` or `sudo apt-get install acl`.
+
+    ```bash
+    # Example for CentOS/RHEL (apache user)
+    sudo setfacl -m u:apache:r /var/log/messages /var/log/secure /var/log/maillog /var/log/fail2ban.log
+
+    # Example for Debian/Ubuntu (www-data user)
+    sudo setfacl -m u:www-data:r /var/log/syslog /var/log/auth.log /var/log/mail.log /var/log/fail2ban.log
+    ```
+
+4.  **🔒 Secure the Script (Very Important!):**
+    This script displays sensitive information. You **must** restrict access to it with a password.
+    -   Create a `.htaccess` file in the same directory as your script and add the following content (adjust the path to your password file):
+        ```apache
+        AuthType Basic
+        AuthName "Restricted Area"
+        AuthUserFile /path/to/your/.htpasswd
+        Require valid-user
+        ```
+    -   Use the `htpasswd` command to create a password file (replace `your_username` with a username of your choice):
+        ```bash
+        htpasswd -c /path/to/your/.htpasswd your_username
+        ```
+
+5.  **View the Report:** Open the PHP file in your browser and log in with the username and password you just created.
+
+---
